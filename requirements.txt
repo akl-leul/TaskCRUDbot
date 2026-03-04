@@ -1,0 +1,5 @@
+python-telegram-bot
+python-dotenv
+apscheduler
+python-telegram-bot-calendar
+sqlite3

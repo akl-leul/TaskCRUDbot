@@ -1,0 +1,33 @@
+# Python temporary files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Environment variables
+.env
+
+# Local database
+tasks.db
+
+# Virtual environments
+venv/
+.venv/
+env/
+ENC/
+htmlcov/
+.tox/
+.nox/
+.coverage
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.log
+
+# IDE settings
+.vscode/
+.idea/
+*.swp
+*.swo
