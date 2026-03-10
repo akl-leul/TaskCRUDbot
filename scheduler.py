@@ -13,12 +13,9 @@ async def send_morning_notifications(bot: Bot):
     today_dt = datetime.now()
     today_str = today_dt.strftime("%Y-%m-%d")
     
-    conn = database.sqlite3.connect(database.DB_NAME)
-    cursor = conn.cursor()
-    cursor.execute('SELECT DISTINCT user_id FROM tasks WHERE due_date = ? AND notified_morning = 0', (today_str,))
-    users = cursor.fetchall()
+    users = database.get_users_to_notify_morning(today_str)
     
-    for (user_id,) in users:
+    for user_id in users:
         tasks = database.get_tasks(user_id, today_str)
         if tasks:
             message = (
@@ -35,17 +32,12 @@ async def send_morning_notifications(bot: Bot):
             await bot.send_message(chat_id=user_id, text=message, parse_mode='Markdown')
             for t in tasks:
                 database.update_task_notification(t[0], "notified_morning")
-    conn.close()
 
 async def check_reminders(bot: Bot):
     now = datetime.now()
     today = now.strftime("%Y-%m-%d")
     
-    conn = database.sqlite3.connect(database.DB_NAME)
-    cursor = conn.cursor()
-    # Check tasks due today that haven't been notified for reminder
-    cursor.execute('SELECT * FROM tasks WHERE due_date = ? AND notified_reminder = 0', (today,))
-    tasks = cursor.fetchall()
+    tasks = database.get_tasks_for_reminders(today)
     
     for t in tasks:
         task_id, user_id, desc, _, due_time, reminder_min, _, _, _ = t
@@ -54,8 +46,6 @@ async def check_reminders(bot: Bot):
         if now >= (due_datetime - timedelta(minutes=reminder_min)):
             await bot.send_message(chat_id=user_id, text=f"⏰ *Reminder*: {desc} is due at {due_time}!")
             database.update_task_notification(task_id, "notified_reminder")
-    
-    conn.close()
 
 async def check_post_tasks(bot: Bot):
     now = datetime.now()

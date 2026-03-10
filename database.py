@@ -13,11 +13,19 @@ def init_db():
     # Schema is handled via migrations in Supabase
     pass
 
+def _clean_time(time_str):
+    """Ensure time is in HH:MM format (strips seconds if present)."""
+    if not time_str: return time_str
+    parts = time_str.split(':')
+    if len(parts) >= 2:
+        return f"{parts[0].zfill(2)}:{parts[1].zfill(2)}"
+    return time_str
+
 def get_pending_checkins(date_str):
     if not supabase: return []
     response = supabase.table("tasks").select("*").eq("due_date", date_str).eq("notified_started", False).execute()
     return [
-        (r['id'], r['user_id'], r['description'], r['due_date'], r['due_time'], r['reminder_minutes'], r['notified_morning'], r['notified_reminder'], r['notified_started'])
+        (r['id'], r['user_id'], r['description'], r['due_date'], _clean_time(r['due_time']), r['reminder_minutes'], r['notified_morning'], r['notified_reminder'], r['notified_started'])
         for r in response.data
     ]
 
@@ -38,7 +46,20 @@ def get_tasks(user_id, date=None):
         query = query.eq("due_date", date)
     response = query.execute()
     return [
-        (r['id'], r['user_id'], r['description'], r['due_date'], r['due_time'], r['reminder_minutes'], r['notified_morning'], r['notified_reminder'], r['notified_started'])
+        (r['id'], r['user_id'], r['description'], r['due_date'], _clean_time(r['due_time']), r['reminder_minutes'], r['notified_morning'], r['notified_reminder'], r['notified_started'])
+        for r in response.data
+    ]
+
+def get_users_to_notify_morning(date_str):
+    if not supabase: return []
+    response = supabase.table("tasks").select("user_id").eq("due_date", date_str).eq("notified_morning", False).execute()
+    return list(set(r['user_id'] for r in response.data))
+
+def get_tasks_for_reminders(date_str):
+    if not supabase: return []
+    response = supabase.table("tasks").select("*").eq("due_date", date_str).eq("notified_reminder", False).execute()
+    return [
+        (r['id'], r['user_id'], r['description'], r['due_date'], _clean_time(r['due_time']), r['reminder_minutes'], r['notified_morning'], r['notified_reminder'], r['notified_started'])
         for r in response.data
     ]
 

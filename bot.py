@@ -174,82 +174,85 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # --- Task Management ---
 
 async def list_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
+    """Shows the initial menu for task management."""
+    display_name = update.effective_user.first_name
+    message = (
+        f"📋 *Hello {display_name}!* 🚀\n"
+        "How can I help you manage your tasks today?\n"
+        "──────────────────"
+    )
+    
+    keyboard = [
+        [
+            InlineKeyboardButton("📅 Today", callback_data="list_today"),
+            InlineKeyboardButton("📅 Tomorrow", callback_data="list_tomorrow")
+        ],
+        [
+            InlineKeyboardButton("📋 This Week", callback_data="list_week"),
+            InlineKeyboardButton("🚨 Deadlines", callback_data="list_deadlines")
+        ],
+        [
+            InlineKeyboardButton("🕒 Office Hours", callback_data="list_office")
+        ]
+    ]
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text(message, parse_mode='Markdown', reply_markup=reply_markup)
+
+async def handle_list_category(query, category):
+    user_id = query.from_user.id
     tasks = database.get_tasks(user_id)
     
     if not tasks:
-        await update.message.reply_text(
-            "🏝️ *Your plate is clean!*\n\n"
-            "You have no upcoming tasks. Use /add to get started.",
+        await query.edit_message_text("🏝️ *Your plate is clean!* 🚀", parse_mode='Markdown')
+        return
+
+    today = datetime.now().date()
+    tomorrow = today + timedelta(days=1)
+    week_end = today + timedelta(days=7)
+    now = datetime.now()
+    
+    filtered_tasks = []
+    title = ""
+
+    if category == "today":
+        title = "🔴 *TODAY'S MISSIONS*"
+        filtered_tasks = [t for t in tasks if datetime.strptime(f"{t[3]} {t[4]}", "%Y-%m-%d %H:%M").date() == today]
+    elif category == "tomorrow":
+        title = "🟠 *TOMORROW'S PLAN*"
+        filtered_tasks = [t for t in tasks if datetime.strptime(f"{t[3]} {t[4]}", "%Y-%m-%d %H:%M").date() == tomorrow]
+    elif category == "week":
+        title = "📋 *THIS WEEK'S GOALS*"
+        filtered_tasks = [t for t in tasks if today <= datetime.strptime(f"{t[3]} {t[4]}", "%Y-%m-%d %H:%M").date() <= week_end]
+    elif category == "deadlines":
+        title = "🚨 *DEADLINES & OVERDUE*"
+        filtered_tasks = [t for t in tasks if datetime.strptime(f"{t[3]} {t[4]}", "%Y-%m-%d %H:%M") < now]
+    elif category == "office":
+        await query.edit_message_text(
+            "🕒 *Office Hours*\n\n"
+            "Academic Team is available:\n"
+            "• Mon - Fri: 9:00 AM - 5:00 PM\n"
+            "• Sat: 10:00 AM - 1:00 PM\n\n"
+            "_(Use /add to schedule a meeting)_", 
             parse_mode='Markdown'
         )
         return
-    
-    # Date helper
-    today = datetime.now().date()
-    tomorrow = today + timedelta(days=1)
-    now = datetime.now()
-    
-    # Grouping
-    overdue_tasks = []
-    today_tasks = []
-    tomorrow_tasks = []
-    upcoming_tasks = []
-    
-    for t in tasks:
-        task_dt = datetime.strptime(f"{t[3]} {t[4]}", "%Y-%m-%d %H:%M")
-        task_date = task_dt.date()
-        
-        if task_dt < now:
-            overdue_tasks.append(t)
-        elif task_date == today:
-            today_tasks.append(t)
-        elif task_date == tomorrow:
-            tomorrow_tasks.append(t)
-        elif task_date > tomorrow:
-            upcoming_tasks.append(t)
-            
-    # Sort
-    overdue_tasks.sort(key=lambda x: (x[3], x[4]))
-    today_tasks.sort(key=lambda x: x[4])
-    tomorrow_tasks.sort(key=lambda x: x[4])
-    upcoming_tasks.sort(key=lambda x: (x[3], x[4]))
-    
-    display_name = update.effective_user.first_name
-    message = f"📋 *{display_name}'s Task Overview*\n"
-    message += "──────────────────\n\n"
+
+    if not filtered_tasks:
+        await query.edit_message_text(f"{title}\n\nNo tasks found here! ✨", parse_mode='Markdown')
+        return
+
+    filtered_tasks.sort(key=lambda x: (x[3], x[4]))
+    message = f"{title}\n──────────────────\n\n"
     
     keyboard = []
+    for t in filtered_tasks:
+        message += f"◽️ `{t[3]}` {t[4]} — *{t[2]}*\n"
+        keyboard.append([InlineKeyboardButton(f"Done ✅: {t[2]}", callback_data=f"del_{t[0]}")])
     
-    if overdue_tasks:
-        message += "⚠️ *OVERDUE*\n"
-        for t in overdue_tasks:
-            message += f"  ◽️ `{t[3]}` {t[4]} — {t[2]}\n"
-            keyboard.append([InlineKeyboardButton(f"Done ✅: {t[2]}", callback_data=f"del_{t[0]}")])
-        message += "\n"
-
-    if today_tasks:
-        message += "🔴 *TODAY*\n"
-        for t in today_tasks:
-            message += f"  ⏳ `{t[4]}` — {t[2]}\n"
-        message += "\n"
-        
-    if tomorrow_tasks:
-        message += "🟡 *TOMORROW*\n"
-        for t in tomorrow_tasks:
-            message += f"  📅 `{t[4]}` — {t[2]}\n"
-        message += "\n"
-        
-    if upcoming_tasks:
-        message += "🔵 *UPCOMING*\n"
-        for t in upcoming_tasks:
-            message += f"  🗓️ `{t[3]}` at `{t[4]}`\n      _{t[2]}_\n"
-        message += "\n"
-        
-    message += "──────────────────"
-    
-    reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
-    await update.message.reply_text(message, parse_mode='Markdown', reply_markup=reply_markup)
+    keyboard.append([InlineKeyboardButton("⬅️ Back to Menu", callback_data="list_back")])
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await query.edit_message_text(message, parse_mode='Markdown', reply_markup=reply_markup)
 
 async def delete_tasks_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -303,6 +306,24 @@ async def generic_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(text=f"🎉 *Awesome!* Task marked as started.\n\n{quote}", parse_mode='Markdown')
     elif query.data.startswith("start_n_"):
         await query.edit_message_text(text="No worries! I'll leave the task on your list. ✍️")
+    elif query.data.startswith("list_"):
+        category = query.data.split("_")[1]
+        if category == "back":
+            # Show the main menu again
+            display_name = query.from_user.first_name
+            message = (
+                f"📋 *Hello {display_name}!* 🚀\n"
+                "How can I help you manage your tasks today?\n"
+                "──────────────────"
+            )
+            keyboard = [
+                [InlineKeyboardButton("📅 Today", callback_data="list_today"), InlineKeyboardButton("📅 Tomorrow", callback_data="list_tomorrow")],
+                [InlineKeyboardButton("📋 This Week", callback_data="list_week"), InlineKeyboardButton("🚨 Deadlines", callback_data="list_deadlines")],
+                [InlineKeyboardButton("🕒 Office Hours", callback_data="list_office")]
+            ]
+            await query.edit_message_text(message, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
+        else:
+            await handle_list_category(query, category)
     elif query.data.startswith("cbcal"):
         # This is likely a calendar callback from an expired or cancelled session
         pass
