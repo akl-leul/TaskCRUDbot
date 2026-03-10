@@ -13,11 +13,34 @@ from telegram.ext import (
     CallbackQueryHandler,
     ConversationHandler
 )
+from telegram.request import HTTPXRequest
 from telegram_bot_calendar import DetailedTelegramCalendar
 from dotenv import load_dotenv
 
-import database
+import supabase_db as database
 import scheduler
+from flask import Flask
+import threading
+
+app_web = Flask(__name__)
+main_bot = None
+main_loop = None
+
+@app_web.route('/')
+def home():
+    return "Bot is alive!", 200
+
+@app_web.route('/cron')
+def trigger_cron():
+    if main_bot and main_loop:
+        asyncio.run_coroutine_threadsafe(scheduler.run_all_checks(main_bot), main_loop)
+        return "Cron executed", 200
+    return "Bot not ready", 503
+
+def run_flask():
+    port = int(os.getenv("PORT", 8080))
+    app_web.run(host='0.0.0.0', port=port)
+
 
 # Load environment variables
 load_dotenv()
@@ -34,7 +57,6 @@ DESCRIPTION, TIME, DATE = range(3)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    database.init_db()
     await update.message.reply_html(
         rf"Hi {user.mention_html()}! 🚀 I'm your *DailyTask Bot*."
         "\n\nI'll help you organize your tasks for tomorrow and beyond."
@@ -290,12 +312,20 @@ def main():
         print("Error: TELEGRAM_BOT_TOKEN not found in .env")
         return
 
-    database.init_db()
-    app = ApplicationBuilder().token(TOKEN).build()
+    # database.init_db()  # Schema is managed in Supabase
+    
+    # Increase timeouts to handle potential network issues
+    request = HTTPXRequest(connect_timeout=20, read_timeout=20)
+    app = ApplicationBuilder().token(TOKEN).request(request).build()
     
     async def post_init(application):
-        loop = asyncio.get_running_loop()
-        scheduler.start_scheduler(application.bot, loop)
+        global main_bot, main_loop
+        main_bot = application.bot
+        main_loop = asyncio.get_running_loop()
+        scheduler.start_scheduler(application.bot, main_loop)
+        
+        # Start Flask in a background thread
+        threading.Thread(target=run_flask, daemon=True).start()
 
     app.post_init = post_init
 
@@ -319,7 +349,7 @@ def main():
     app.add_handler(CallbackQueryHandler(generic_callback)) # For legacy delete buttons
 
     print("Bot is starting...")
-    app.run_polling()
+    app.run_polling(timeout=30)
 
 if __name__ == '__main__':
     main()

@@ -1,6 +1,6 @@
 from apscheduler.schedulers.background import BackgroundScheduler
 from datetime import datetime, timedelta
-import database
+import supabase_db as database
 import asyncio
 from telegram import Bot
 import os
@@ -84,6 +84,12 @@ async def check_post_tasks(bot: Bot):
                 parse_mode='Markdown'
             )
             database.update_task_notification(task_id, "notified_started")
+
+async def run_all_checks(bot: Bot):
+    """Run all scheduled checks immediately (used for external cron triggers)."""
+    await send_morning_notifications(bot)
+    await check_reminders(bot)
+    await check_post_tasks(bot)
 
 def start_scheduler(bot: Bot, loop):
     scheduler = BackgroundScheduler()
