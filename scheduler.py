@@ -1,6 +1,6 @@
 from apscheduler.schedulers.background import BackgroundScheduler
 from datetime import datetime, timedelta
-import supabase_db as database
+import database
 import asyncio
 from telegram import Bot
 import os

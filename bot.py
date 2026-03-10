@@ -17,7 +17,7 @@ from telegram.request import HTTPXRequest
 from telegram_bot_calendar import DetailedTelegramCalendar
 from dotenv import load_dotenv
 
-import supabase_db as database
+import database
 import scheduler
 from flask import Flask
 import threading
@@ -312,7 +312,7 @@ def main():
         print("Error: TELEGRAM_BOT_TOKEN not found in .env")
         return
 
-    # database.init_db()  # Schema is managed in Supabase
+
     
     # Increase timeouts to handle potential network issues
     request = HTTPXRequest(connect_timeout=20, read_timeout=20)
