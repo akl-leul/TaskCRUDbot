@@ -1,4 +1,6 @@
-# DailyTask Bot Setup Guide
+![Bot Image](image.png)
+
+# DailyTask Bot
 
 **Created by Leul**
 
@@ -127,3 +129,4 @@ This project is open-sourced under the MIT License. See [LICENSE](LICENSE) for d
 ---
 
 **Created with ❤️ by Leul**
+
