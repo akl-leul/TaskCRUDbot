@@ -172,6 +172,17 @@ def delete_task(task_id, user_id):
     if not supabase: return
     supabase.table("tasks").delete().eq("id", task_id).eq("user_id", user_id).execute()
 
+def update_task(task_id: int, user_id: int, **fields):
+    """Update specific fields on a task. Only the owner can update their own task."""
+    if not supabase or not fields: return
+    supabase.table("tasks").update(fields).eq("id", task_id).eq("user_id", user_id).execute()
+
+def get_collaborators_for_task(task_id: int):
+    """Return a list of collaborator user_ids for a shared task (for live update notifications)."""
+    if not supabase: return []
+    response = supabase.table("shared_plans").select("collaborator_id").eq("task_id", task_id).execute()
+    return [r['collaborator_id'] for r in response.data]
+
 def update_task_notification(task_id, column):
     if not supabase: return
     supabase.table("tasks").update({column: True}).eq("id", task_id).execute()

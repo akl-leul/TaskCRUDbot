@@ -55,9 +55,6 @@ logging.basicConfig(
 # Conversation States
 DESCRIPTION, TIME, DATE = range(3)
 
-# Share Conversation States
-SHARE_TASK_SELECT, SHARE_USERNAME_INPUT = range(3, 5)
-
 # ─────────────────────────────────────────────────────────────────
 # START & HELP
 # ─────────────────────────────────────────────────────────────────
@@ -72,6 +69,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "\n\n✨ <b>Commands:</b>"
         "\n/add - Add a new task step-by-step"
         "\n/list - View your tasks"
+        "\n/edit - Update an existing task"
         "\n/delete - Remove a task"
         "\n/share - Share a task with a teammate"
         "\n/shared - View tasks teammates shared with you"
@@ -85,6 +83,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🤖 *DailyTask Bot Help*\n\n"
         "✨ /add - Start the interactive task creation flow.\n"
         "📄 /list - Show all your upcoming tasks.\n"
+        "✏️ /edit - Update a task's description, time, or date.\n"
         "❌ /delete - Choose tasks to remove.\n"
         "🛑 /stop - Clear ALL your tasks and stop notifications.\n"
         "🚫 /cancel - Stop adding a task anytime.\n\n"
@@ -303,7 +302,7 @@ async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ─────────────────────────────────────────────────────────────────
 
 async def share_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Entry point for /share — show user's tasks to pick from."""
+    """Show user's task list as buttons so they can pick one to share."""
     user_id = update.effective_user.id
     tasks = database.get_tasks(user_id)
 
@@ -312,7 +311,11 @@ async def share_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "📭 You have no tasks to share yet.\n"
             "Add one first with /add!"
         )
-        return ConversationHandler.END
+        return
+
+    # Clear any previous share state
+    context.user_data.pop('share_task_id', None)
+    context.user_data.pop('share_awaiting_username', None)
 
     keyboard = []
     for t in tasks:
@@ -325,57 +328,42 @@ async def share_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode='Markdown',
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
-    return SHARE_TASK_SELECT
 
-async def share_task_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """User picked a task. Now ask for the collaborator's @username."""
-    query = update.callback_query
-    await query.answer()
+async def handle_share_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Standalone MessageHandler: fires when the user types an @username after
+    selecting a task to share. State is tracked via context.user_data.
+    """
+    if not context.user_data.get('share_awaiting_username'):
+        return  # Not in a share flow — let other handlers deal with this message
 
-    if query.data == "sharetask_cancel":
-        await query.edit_message_text("🚫 Share cancelled.")
-        context.user_data.clear()
-        return ConversationHandler.END
-
-    task_id = int(query.data.split("_")[1])
-    context.user_data['share_task_id'] = task_id
-
-    await query.edit_message_text(
-        "👤 *Who do you want to share with?*\n\n"
-        "Enter their Telegram @username:\n_(e.g., @john_doe)_",
-        parse_mode='Markdown'
-    )
-    return SHARE_USERNAME_INPUT
-
-async def share_username_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Received @username — look up user and create the share."""
     username_input = update.message.text.strip()
     task_id = context.user_data.get('share_task_id')
     owner_id = update.effective_user.id
 
-    # Look up collaborator
+    # Clear state immediately
+    context.user_data.pop('share_task_id', None)
+    context.user_data.pop('share_awaiting_username', None)
+
     collab = database.get_user_by_username(username_input)
 
     if not collab:
+        clean = username_input.lstrip('@')
         await update.message.reply_text(
-            f"❌ *@{username_input.lstrip('@')} is not registered.*\n\n"
+            f"❌ *@{clean} is not registered.*\n\n"
             "They need to send /start to this bot first before you can share tasks with them.",
             parse_mode='Markdown'
         )
-        context.user_data.clear()
-        return ConversationHandler.END
+        return
 
     collab_id = collab['user_id']
 
     if collab_id == owner_id:
         await update.message.reply_text("😅 You can't share a task with yourself!")
-        context.user_data.clear()
-        return ConversationHandler.END
+        return
 
-    # Create the share
     database.share_task(task_id, owner_id, collab_id)
 
-    # Get task details for the notification
     tasks = database.get_tasks(owner_id)
     task_info = next((t for t in tasks if t[0] == task_id), None)
     task_desc = task_info[2] if task_info else "a task"
@@ -388,7 +376,6 @@ async def share_username_received(update: Update, context: ContextTypes.DEFAULT_
         parse_mode='Markdown'
     )
 
-    # Notify the collaborator
     try:
         await context.bot.send_message(
             chat_id=collab_id,
@@ -401,10 +388,7 @@ async def share_username_received(update: Update, context: ContextTypes.DEFAULT_
             parse_mode='Markdown'
         )
     except Exception:
-        pass  # Collaborator may have blocked the bot; that's okay
-
-    context.user_data.clear()
-    return ConversationHandler.END
+        pass
 
 # ─────────────────────────────────────────────────────────────────
 # COLLABORATIVE PLANNING: /shared and /myshares
@@ -470,6 +454,107 @@ async def my_shares(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ─────────────────────────────────────────────────────────────────
 # CALLBACK QUERY ROUTER
 # ─────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────
+# LIVE TASK EDITING: /edit
+# ─────────────────────────────────────────────────────────────────
+
+async def edit_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show the user's tasks as buttons so they can pick one to edit."""
+    user_id = update.effective_user.id
+    tasks = database.get_tasks(user_id)
+
+    if not tasks:
+        await update.message.reply_text(
+            "📭 You have no tasks to edit yet.\nAdd one with /add!"
+        )
+        return
+
+    context.user_data.pop('edit_task_id', None)
+    context.user_data.pop('edit_field_awaiting', None)
+
+    keyboard = []
+    for t in tasks:
+        label = f"✏️ {t[2][:28]} — {t[3]}"
+        keyboard.append([InlineKeyboardButton(label, callback_data=f"edittask_{t[0]}")])
+    keyboard.append([InlineKeyboardButton("🚫 Cancel", callback_data="edittask_cancel")])
+
+    await update.message.reply_text(
+        "✏️ *Edit a Task*\n\nWhich task do you want to update?",
+        parse_mode='Markdown',
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+async def handle_edit_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Standalone MessageHandler: fires when the user types a new value for the
+    field they're editing. State is tracked via context.user_data.
+    """
+    if not context.user_data.get('edit_field_awaiting'):
+        return  # Not in an edit flow
+
+    field = context.user_data.pop('edit_field_awaiting')
+    task_id = context.user_data.pop('edit_task_id', None)
+    user_id = update.effective_user.id
+    value = update.message.text.strip()
+
+    if field == 'description':
+        database.update_task(task_id, user_id, description=value)
+        label, new_val = "Description", value
+    elif field == 'time':
+        parsed = parse_time(value)
+        if not parsed:
+            await update.message.reply_text(
+                "❌ *Invalid time format.*\nUse HH:MM (e.g., 14:30) or 2pm.",
+                parse_mode='Markdown'
+            )
+            # Restore state so user can retry
+            context.user_data['edit_task_id'] = task_id
+            context.user_data['edit_field_awaiting'] = 'time'
+            return
+        database.update_task(task_id, user_id, due_time=parsed)
+        label, new_val = "Time", parsed
+    elif field == 'date':
+        try:
+            datetime.strptime(value, "%Y-%m-%d")
+        except ValueError:
+            await update.message.reply_text(
+                "❌ *Invalid date format.*\nUse YYYY-MM-DD (e.g., 2026-03-15).",
+                parse_mode='Markdown'
+            )
+            context.user_data['edit_task_id'] = task_id
+            context.user_data['edit_field_awaiting'] = 'date'
+            return
+        database.update_task(task_id, user_id, due_date=value)
+        label, new_val = "Date", value
+    else:
+        return
+
+    await update.message.reply_text(
+        f"✅ *Task updated!*\n"
+        f"🗒 *{label}* set to: `{new_val}`",
+        parse_mode='Markdown'
+    )
+
+    # Notify collaborators who have this task shared with them
+    collaborators = database.get_collaborators_for_task(task_id)
+    owner_name = update.effective_user.first_name
+    tasks = database.get_tasks(user_id)
+    task_info = next((t for t in tasks if t[0] == task_id), None)
+    if collaborators and task_info:
+        for collab_id in collaborators:
+            try:
+                await context.bot.send_message(
+                    chat_id=collab_id,
+                    text=(
+                        f"🔄 *{owner_name} updated a shared task!*\n\n"
+                        f"📌 *{task_info[2]}*\n"
+                        f"📅 {task_info[3]} at {task_info[4]}"
+                    ),
+                    parse_mode='Markdown'
+                )
+            except Exception:
+                pass
+
 
 MOTIVATIONS = [
     "🚀 *Legendary!* You're crushing it.",
@@ -488,7 +573,67 @@ async def generic_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     quote = random.choice(MOTIVATIONS)
     
-    if query.data.startswith("del_"):
+    if query.data.startswith("edittask_"):
+        # ── Edit flow: pick a task ───────────────────────────────
+        if query.data == "edittask_cancel":
+            context.user_data.pop('edit_task_id', None)
+            context.user_data.pop('edit_field_awaiting', None)
+            await query.edit_message_text("🚫 Edit cancelled.")
+            return
+
+        task_id = int(query.data.split("_")[1])
+        context.user_data['edit_task_id'] = task_id
+
+        keyboard = [
+            [InlineKeyboardButton("✏️ Description",  callback_data=f"editfield_description_{task_id}")],
+            [InlineKeyboardButton("⏰ Time",         callback_data=f"editfield_time_{task_id}")],
+            [InlineKeyboardButton("📅 Date",         callback_data=f"editfield_date_{task_id}")],
+            [InlineKeyboardButton("🚫 Cancel",       callback_data="editedit_cancel")],
+        ]
+        await query.edit_message_text(
+            "✏️ *What do you want to change?*",
+            parse_mode='Markdown',
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+    elif query.data.startswith("editfield_"):
+        # ── Edit flow: pick a field ────────────────────────────
+        parts = query.data.split("_")   # ["editfield", "<field>", "<task_id>"]
+        field = parts[1]
+        task_id = int(parts[2])
+        context.user_data['edit_task_id'] = task_id
+        context.user_data['edit_field_awaiting'] = field
+
+        prompts = {
+            'description': "✏️ Send the *new description* for this task:",
+            'time':        "⏰ Send the *new time* (e.g., `14:30` or `2pm`):",
+            'date':        "📅 Send the *new date* in `YYYY-MM-DD` format\n(e.g., `2026-03-20`):",
+        }
+        await query.edit_message_text(
+            prompts.get(field, "Send the new value:"),
+            parse_mode='Markdown'
+        )
+    elif query.data == "editedit_cancel":
+        context.user_data.pop('edit_task_id', None)
+        context.user_data.pop('edit_field_awaiting', None)
+        await query.edit_message_text("🚫 Edit cancelled.")
+    elif query.data.startswith("sharetask_"):
+        # ── Share flow: user picked a task ──────────────────────────────
+        if query.data == "sharetask_cancel":
+            context.user_data.pop('share_task_id', None)
+            context.user_data.pop('share_awaiting_username', None)
+            await query.edit_message_text("🚫 Share cancelled.")
+            return
+
+        task_id = int(query.data.split("_")[1])
+        context.user_data['share_task_id'] = task_id
+        context.user_data['share_awaiting_username'] = True
+
+        await query.edit_message_text(
+            "👤 *Who do you want to share with?*\n\n"
+            "Send me their Telegram @username:",
+            parse_mode='Markdown'
+        )
+    elif query.data.startswith("del_"):
         task_id = int(query.data.split("_")[1])
         database.delete_task(task_id, query.from_user.id)
         await query.edit_message_text(text=f"✅ Task deleted successfully.\n\n{quote}", parse_mode='Markdown')
@@ -536,7 +681,18 @@ def main():
 
     request = HTTPXRequest(connect_timeout=20, read_timeout=20)
     app = ApplicationBuilder().token(TOKEN).request(request).build()
-    
+
+    async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+        from telegram.error import Conflict
+        if isinstance(context.error, Conflict):
+            logging.warning(
+                "⚠️  Another bot instance is already running. "
+                "Stop the deployed service (Railway/Render) or kill the local process. "
+                "Only one instance can poll at a time."
+            )
+        else:
+            logging.error("Unhandled error:", exc_info=context.error)
+
     async def post_init(application):
         global main_bot, main_loop
         main_bot = application.bot
@@ -545,6 +701,7 @@ def main():
         threading.Thread(target=run_flask, daemon=True).start()
 
     app.post_init = post_init
+    app.add_error_handler(error_handler)
 
     # Conversation Handler: Add Task
     add_conv = ConversationHandler(
@@ -557,25 +714,19 @@ def main():
         fallbacks=[CommandHandler("cancel", cancel)],
     )
 
-    # Conversation Handler: Share Task
-    share_conv = ConversationHandler(
-        entry_points=[CommandHandler("share", share_start)],
-        states={
-            SHARE_TASK_SELECT: [CallbackQueryHandler(share_task_selected, pattern="^sharetask_")],
-            SHARE_USERNAME_INPUT: [MessageHandler(filters.TEXT & ~filters.COMMAND, share_username_received)],
-        },
-        fallbacks=[CommandHandler("cancel", cancel)],
-    )
-
     app.add_handler(add_conv)
-    app.add_handler(share_conv)
+    # Text input handlers for stateful flows — registered in group 0 before the catch-all
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_share_username), group=0)
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_edit_input), group=0)
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("list", list_tasks))
     app.add_handler(CommandHandler("delete", delete_tasks_menu))
     app.add_handler(CommandHandler("stop", stop_command))
+    app.add_handler(CommandHandler("share", share_start))
     app.add_handler(CommandHandler("shared", shared_with_me))
     app.add_handler(CommandHandler("myshares", my_shares))
+    app.add_handler(CommandHandler("edit", edit_start))
     app.add_handler(CallbackQueryHandler(generic_callback))
 
     print("Bot is starting...")
