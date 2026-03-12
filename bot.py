@@ -55,15 +55,27 @@ logging.basicConfig(
 # Conversation States
 DESCRIPTION, TIME, DATE = range(3)
 
+# Share Conversation States
+SHARE_TASK_SELECT, SHARE_USERNAME_INPUT = range(3, 5)
+
+# ─────────────────────────────────────────────────────────────────
+# START & HELP
+# ─────────────────────────────────────────────────────────────────
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
+    # Auto-register user so others can find them by @username
+    database.register_user(user.id, user.username or "", user.first_name or "")
     await update.message.reply_html(
-        rf"Hi {user.mention_html()}! 🚀 I'm your *DailyTask Bot*."
-        "\n\nI'll help you organize your tasks for tomorrow and beyond."
-        "\n\n✨ *Commands:*"
+        rf"Hi {user.mention_html()}! 🚀 I'm your <b>DailyTask Bot</b>."
+        "\n\nI'll help you organize your tasks and <b>collaborate</b> with teammates."
+        "\n\n✨ <b>Commands:</b>"
         "\n/add - Add a new task step-by-step"
         "\n/list - View your tasks"
         "\n/delete - Remove a task"
+        "\n/share - Share a task with a teammate"
+        "\n/shared - View tasks teammates shared with you"
+        "\n/myshares - View tasks you've shared + unshare"
         "\n/stop - Stop all notifications and clear your tasks"
         "\n/cancel - Cancel current action"
     )
@@ -76,13 +88,20 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "❌ /delete - Choose tasks to remove.\n"
         "🛑 /stop - Clear ALL your tasks and stop notifications.\n"
         "🚫 /cancel - Stop adding a task anytime.\n\n"
-        "💡 *Tips:* \n"
+        "🤝 *Collaborative Planning:*\n"
+        "/share - Share one of your tasks with a teammate by @username.\n"
+        "/shared - See tasks that teammates have shared with you.\n"
+        "/myshares - See tasks you've shared and remove shares.\n\n"
+        "💡 *Tips:*\n"
+        "- Teammates must have started the bot to be found by @username.\n"
         "- I'll remind you 2 hours before the task starts.\n"
         "- You'll get a summary every morning at 8:00 AM."
     )
     await update.message.reply_text(help_text, parse_mode='Markdown')
 
-# --- Add Task Conversation ---
+# ─────────────────────────────────────────────────────────────────
+# ADD TASK CONVERSATION
+# ─────────────────────────────────────────────────────────────────
 
 async def add_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
@@ -120,8 +139,6 @@ async def add_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if parsed_time:
         context.user_data['time'] = parsed_time
-        
-        # Start Calendar Selection
         calendar, step = DetailedTelegramCalendar().build()
         await update.message.reply_text(
             f"Select {step}:",
@@ -165,13 +182,15 @@ async def add_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🚫 Task creation cancelled.", 
+        "🚫 Action cancelled.", 
         reply_markup=ReplyKeyboardRemove()
     )
     context.user_data.clear()
     return ConversationHandler.END
 
-# --- Task Management ---
+# ─────────────────────────────────────────────────────────────────
+# TASK MANAGEMENT (LIST / DELETE / STOP)
+# ─────────────────────────────────────────────────────────────────
 
 async def list_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Shows the initial menu for task management."""
@@ -279,6 +298,179 @@ async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode='Markdown'
     )
 
+# ─────────────────────────────────────────────────────────────────
+# COLLABORATIVE PLANNING: /share
+# ─────────────────────────────────────────────────────────────────
+
+async def share_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Entry point for /share — show user's tasks to pick from."""
+    user_id = update.effective_user.id
+    tasks = database.get_tasks(user_id)
+
+    if not tasks:
+        await update.message.reply_text(
+            "📭 You have no tasks to share yet.\n"
+            "Add one first with /add!"
+        )
+        return ConversationHandler.END
+
+    keyboard = []
+    for t in tasks:
+        label = f"📌 {t[2][:30]} — {t[3]}"
+        keyboard.append([InlineKeyboardButton(label, callback_data=f"sharetask_{t[0]}")])
+    keyboard.append([InlineKeyboardButton("🚫 Cancel", callback_data="sharetask_cancel")])
+
+    await update.message.reply_text(
+        "🤝 *Share a Task*\n\nPick the task you want to share:",
+        parse_mode='Markdown',
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+    return SHARE_TASK_SELECT
+
+async def share_task_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """User picked a task. Now ask for the collaborator's @username."""
+    query = update.callback_query
+    await query.answer()
+
+    if query.data == "sharetask_cancel":
+        await query.edit_message_text("🚫 Share cancelled.")
+        context.user_data.clear()
+        return ConversationHandler.END
+
+    task_id = int(query.data.split("_")[1])
+    context.user_data['share_task_id'] = task_id
+
+    await query.edit_message_text(
+        "👤 *Who do you want to share with?*\n\n"
+        "Enter their Telegram @username:\n_(e.g., @john_doe)_",
+        parse_mode='Markdown'
+    )
+    return SHARE_USERNAME_INPUT
+
+async def share_username_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Received @username — look up user and create the share."""
+    username_input = update.message.text.strip()
+    task_id = context.user_data.get('share_task_id')
+    owner_id = update.effective_user.id
+
+    # Look up collaborator
+    collab = database.get_user_by_username(username_input)
+
+    if not collab:
+        await update.message.reply_text(
+            f"❌ *@{username_input.lstrip('@')} is not registered.*\n\n"
+            "They need to send /start to this bot first before you can share tasks with them.",
+            parse_mode='Markdown'
+        )
+        context.user_data.clear()
+        return ConversationHandler.END
+
+    collab_id = collab['user_id']
+
+    if collab_id == owner_id:
+        await update.message.reply_text("😅 You can't share a task with yourself!")
+        context.user_data.clear()
+        return ConversationHandler.END
+
+    # Create the share
+    database.share_task(task_id, owner_id, collab_id)
+
+    # Get task details for the notification
+    tasks = database.get_tasks(owner_id)
+    task_info = next((t for t in tasks if t[0] == task_id), None)
+    task_desc = task_info[2] if task_info else "a task"
+    owner_name = update.effective_user.first_name
+
+    await update.message.reply_text(
+        f"✅ *Task shared successfully!*\n\n"
+        f"📌 *{task_desc}*\n"
+        f"👤 Shared with: @{collab['username']}",
+        parse_mode='Markdown'
+    )
+
+    # Notify the collaborator
+    try:
+        await context.bot.send_message(
+            chat_id=collab_id,
+            text=(
+                f"🤝 *{owner_name} shared a task with you!*\n\n"
+                f"📌 *{task_desc}*\n"
+                f"📅 {task_info[3] if task_info else ''} at {task_info[4] if task_info else ''}\n\n"
+                f"Use /shared to view all tasks shared with you."
+            ),
+            parse_mode='Markdown'
+        )
+    except Exception:
+        pass  # Collaborator may have blocked the bot; that's okay
+
+    context.user_data.clear()
+    return ConversationHandler.END
+
+# ─────────────────────────────────────────────────────────────────
+# COLLABORATIVE PLANNING: /shared and /myshares
+# ─────────────────────────────────────────────────────────────────
+
+async def shared_with_me(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show tasks other users have shared with me."""
+    user_id = update.effective_user.id
+    shares = database.get_shared_with_me(user_id)
+
+    if not shares:
+        await update.message.reply_text(
+            "📭 *No shared tasks yet.*\n\n"
+            "When a teammate shares a task with you, it will appear here.",
+            parse_mode='Markdown'
+        )
+        return
+
+    message = "🤝 *Tasks Shared With You*\n──────────────────\n\n"
+    for s in shares:
+        owner_tag = f"@{s['owner_username']}" if s['owner_username'] else s['owner_first_name']
+        message += (
+            f"📌 *{s['description']}*\n"
+            f"   📅 {s['due_date']} at {s['due_time']}\n"
+            f"   👤 From: {owner_tag}\n\n"
+        )
+
+    await update.message.reply_text(message, parse_mode='Markdown')
+
+async def my_shares(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show tasks I've shared with others, with an Unshare button."""
+    user_id = update.effective_user.id
+    shares = database.get_my_shares(user_id)
+
+    if not shares:
+        await update.message.reply_text(
+            "📭 *You haven't shared any tasks yet.*\n\n"
+            "Use /share to collaborate with a teammate.",
+            parse_mode='Markdown'
+        )
+        return
+
+    message = "📤 *Tasks You've Shared*\n──────────────────\n\n"
+    keyboard = []
+    for s in shares:
+        collab_tag = f"@{s['collab_username']}" if s['collab_username'] else s['collab_first_name']
+        message += (
+            f"📌 *{s['description']}*\n"
+            f"   📅 {s['due_date']} at {s['due_time']}\n"
+            f"   👤 With: {collab_tag}\n\n"
+        )
+        keyboard.append([InlineKeyboardButton(
+            f"❌ Unshare: {s['description'][:25]} → {collab_tag}",
+            callback_data=f"unshare_{s['share_id']}"
+        )])
+
+    await update.message.reply_text(
+        message,
+        parse_mode='Markdown',
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+# ─────────────────────────────────────────────────────────────────
+# CALLBACK QUERY ROUTER
+# ─────────────────────────────────────────────────────────────────
+
 MOTIVATIONS = [
     "🚀 *Legendary!* You're crushing it.",
     "✨ *Believe in yourself!* Every small step counts.",
@@ -306,10 +498,16 @@ async def generic_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(text=f"🎉 *Awesome!* Task marked as started.\n\n{quote}", parse_mode='Markdown')
     elif query.data.startswith("start_n_"):
         await query.edit_message_text(text="No worries! I'll leave the task on your list. ✍️")
+    elif query.data.startswith("unshare_"):
+        share_id = int(query.data.split("_")[1])
+        database.remove_share(share_id, query.from_user.id)
+        await query.edit_message_text(
+            text="✅ *Share removed successfully.*\n\nThe collaborator can no longer see this task in /shared.",
+            parse_mode='Markdown'
+        )
     elif query.data.startswith("list_"):
         category = query.data.split("_")[1]
         if category == "back":
-            # Show the main menu again
             display_name = query.from_user.first_name
             message = (
                 f"📋 *Hello {display_name}!* 🚀\n"
@@ -325,17 +523,17 @@ async def generic_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await handle_list_category(query, category)
     elif query.data.startswith("cbcal"):
-        # This is likely a calendar callback from an expired or cancelled session
         pass
+
+# ─────────────────────────────────────────────────────────────────
+# MAIN
+# ─────────────────────────────────────────────────────────────────
 
 def main():
     if not TOKEN or TOKEN == "YOUR_BOT_TOKEN_HERE":
         print("Error: TELEGRAM_BOT_TOKEN not found in .env")
         return
 
-
-    
-    # Increase timeouts to handle potential network issues
     request = HTTPXRequest(connect_timeout=20, read_timeout=20)
     app = ApplicationBuilder().token(TOKEN).request(request).build()
     
@@ -344,30 +542,41 @@ def main():
         main_bot = application.bot
         main_loop = asyncio.get_running_loop()
         scheduler.start_scheduler(application.bot, main_loop)
-        
-        # Start Flask in a background thread
         threading.Thread(target=run_flask, daemon=True).start()
 
     app.post_init = post_init
 
-    # Conversation Handler for adding tasks
+    # Conversation Handler: Add Task
     add_conv = ConversationHandler(
         entry_points=[CommandHandler("add", add_start)],
         states={
             DESCRIPTION: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_description)],
             TIME: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_time)],
-            DATE: [CallbackQueryHandler(add_date)]
+            DATE: [CallbackQueryHandler(add_date, pattern="^cbcal")],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+    )
+
+    # Conversation Handler: Share Task
+    share_conv = ConversationHandler(
+        entry_points=[CommandHandler("share", share_start)],
+        states={
+            SHARE_TASK_SELECT: [CallbackQueryHandler(share_task_selected, pattern="^sharetask_")],
+            SHARE_USERNAME_INPUT: [MessageHandler(filters.TEXT & ~filters.COMMAND, share_username_received)],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
     )
 
     app.add_handler(add_conv)
+    app.add_handler(share_conv)
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("list", list_tasks))
     app.add_handler(CommandHandler("delete", delete_tasks_menu))
     app.add_handler(CommandHandler("stop", stop_command))
-    app.add_handler(CallbackQueryHandler(generic_callback)) # For legacy delete buttons
+    app.add_handler(CommandHandler("shared", shared_with_me))
+    app.add_handler(CommandHandler("myshares", my_shares))
+    app.add_handler(CallbackQueryHandler(generic_callback))
 
     print("Bot is starting...")
     app.run_polling(timeout=30)
